@@ -1,0 +1,172 @@
+// static/chat.js
+const socket = io();
+
+// UI elements
+const usernameEl = document.getElementById('username');
+const roomNameEl = document.getElementById('roomName');
+const btnJoin = document.getElementById('btnJoin');
+const btnCreate = document.getElementById('btnCreate');
+const currentRoomEl = document.getElementById('currentRoom');
+const chatBox = document.getElementById('chatBox');
+const msgInput = document.getElementById('msgInput');
+const sendBtn = document.getElementById('sendBtn');
+const typingIndicator = document.getElementById('typingIndicator');
+const roomsList = document.getElementById('roomsList');
+const userList = document.getElementById('userList');
+
+let currentRoom = null;
+let currentUser = null;
+let typingTimeout = null;
+
+function addSystem(text) {
+  const el = document.createElement('div');
+  el.className = 'system small';
+  el.textContent = text;
+  chatBox.appendChild(el);
+  chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+function addMessage(msg) {
+  const el = document.createElement('div');
+  el.className = 'msg';
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const time = new Date(msg.ts).toLocaleString();
+  meta.textContent = `${msg.user} · ${time}`;
+  const body = document.createElement('div');
+  body.textContent = msg.text;
+  el.appendChild(meta);
+  el.appendChild(body);
+  chatBox.appendChild(el);
+  chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+function setUserList(users) {
+  userList.textContent = users.join(', ');
+}
+
+async function fetchRooms() {
+  try {
+    const res = await fetch('/rooms');
+    const json = await res.json();
+    renderRooms(json);
+  } catch (err) {
+    console.error('Failed to fetch rooms', err);
+  }
+}
+
+function renderRooms(list) {
+  roomsList.innerHTML = '';
+  if (!list || list.length === 0) {
+    const el = document.createElement('div');
+    el.className = 'text-muted small';
+    el.id = 'noRooms';
+    el.textContent = 'No rooms yet';
+    roomsList.appendChild(el);
+    return;
+  }
+  list.forEach(r => {
+    const b = document.createElement('button');
+    b.className = 'btn btn-sm btn-outline-primary w-100 mb-1 text-start';
+    b.textContent = `${r.name} (${r.users})`;
+    b.onclick = () => {
+      roomNameEl.value = r.name;
+    };
+    roomsList.appendChild(b);
+  });
+}
+
+btnCreate.onclick = () => {
+  const room = roomNameEl.value.trim();
+  if (!room) { alert('Room name required'); return; }
+  socket.emit('create_room', {room});
+  roomNameEl.value = room;
+  fetchRooms();
+};
+
+btnJoin.onclick = () => {
+  const user = usernameEl.value.trim();
+  const room = roomNameEl.value.trim();
+  if (!user || !room) { alert('Enter display name and room'); return; }
+  currentUser = user;
+  currentRoom = room;
+  currentRoomEl.textContent = room;
+  chatBox.innerHTML = '';
+  socket.emit('join', {room, user});
+  fetchRooms();
+};
+
+sendBtn.onclick = () => {
+  sendMessage();
+};
+
+msgInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    sendMessage();
+    e.preventDefault();
+  } else {
+    emitTyping(true);
+    if (typingTimeout) clearTimeout(typingTimeout);
+    typingTimeout = setTimeout(() => emitTyping(false), 1200);
+  }
+});
+
+function sendMessage() {
+  const text = msgInput.value.trim();
+  if (!text || !currentRoom || !currentUser) return;
+  socket.emit('message', {room: currentRoom, user: currentUser, text: text});
+  msgInput.value = '';
+  emitTyping(false);
+}
+
+function emitTyping(flag) {
+  if (!currentRoom || !currentUser) return;
+  socket.emit('typing', {room: currentRoom, user: currentUser, typing: flag});
+}
+
+// socket event handlers
+socket.on('connect', () => {
+  fetchRooms();
+});
+
+socket.on('room_created', (data) => {
+  fetchRooms();
+});
+
+socket.on('history', (data) => {
+  if (data.room !== currentRoom) return;
+  chatBox.innerHTML = '';
+  data.history.forEach(addMessage);
+});
+
+socket.on('message', (data) => {
+  if (data.room !== currentRoom) return;
+  addMessage(data.message);
+});
+
+socket.on('user_joined', (data) => {
+  if (data.room !== currentRoom) return;
+  addSystem(`${data.user} joined`);
+});
+
+socket.on('user_left', (data) => {
+  if (data.room !== currentRoom) return;
+  addSystem(`${data.user} left`);
+});
+
+socket.on('room_users', (data) => {
+  if (data.room !== currentRoom) return;
+  setUserList(data.users);
+});
+
+socket.on('typing', (data) => {
+  if (data.room !== currentRoom) return;
+  if (data.typing) {
+    typingIndicator.textContent = `${data.user} is typing...`;
+  } else {
+    typingIndicator.textContent = '';
+  }
+});
+
+socket.on('create_error', (d) => alert(d.error || 'Error creating room'));
+socket.on('join_error', (d) => alert(d.error || 'Error joining room'));
