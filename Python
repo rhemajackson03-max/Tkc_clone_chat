@@ -1,0 +1,126 @@
+# app.py
+import os
+from datetime import datetime
+from flask import Flask, render_template, request, jsonify
+from flask_socketio import SocketIO, emit, join_room, leave_room
+
+# Use eventlet for Socket.IO server
+async_mode = "eventlet"
+
+app = Flask(__name__)
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key')
+
+socketio = SocketIO(app, async_mode=async_mode, cors_allowed_origins="*")
+
+# In-memory stores (for prototype). Replace with Redis/DB in production.
+ROOMS = {}  # room_name -> {"users": set(), "history": [ {user, text, ts} ]}
+MAX_HISTORY = 200
+
+def add_message_to_room(room, user, text):
+    msg = {"user": user, "text": text, "ts": datetime.utcnow().isoformat() + "Z"}
+    room_obj = ROOMS.setdefault(room, {"users": set(), "history": []})
+    room_obj["history"].append(msg)
+    if len(room_obj["history"]) > MAX_HISTORY:
+        room_obj["history"].pop(0)
+    return msg
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+@app.route("/rooms")
+def list_rooms():
+    # Returns list of rooms and count of users
+    out = [{"name": name, "users": len(data["users"])} for name, data in ROOMS.items()]
+    return jsonify(out)
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok", "rooms": len(ROOMS)})
+
+# --- Socket.IO events ---
+@socketio.on("connect")
+def on_connect():
+    # client connected
+    # no automatic broadcast
+    pass
+
+@socketio.on("create_room")
+def on_create_room(data):
+    # data: {"room": "<room name>"}
+    room = data.get("room", "").strip()
+    if not room:
+        emit("create_error", {"error": "Room name required"})
+        return
+    if room not in ROOMS:
+        ROOMS[room] = {"users": set(), "history": []}
+    emit("room_created", {"room": room}, broadcast=True)
+
+@socketio.on("join")
+def on_join(data):
+    # data: {"room": "roomname", "user": "displayname"}
+    room = data.get("room")
+    user = data.get("user")
+    if not room or not user:
+        emit("join_error", {"error": "Missing room or username"})
+        return
+
+    join_room(room)
+    ROOMS.setdefault(room, {"users": set(), "history": []})
+    ROOMS[room]["users"].add(user)
+
+    # notify room
+    ts = datetime.utcnow().isoformat() + "Z"
+    emit("user_joined", {"user": user, "room": room, "ts": ts}, room=room)
+    emit("room_users", {"room": room, "users": list(ROOMS[room]["users"])}, room=room)
+
+    # send room history to the joining user only
+    history = ROOMS[room]["history"]
+    emit("history", {"room": room, "history": history})
+
+@socketio.on("leave")
+def on_leave(data):
+    # data: {"room": "roomname", "user": "displayname"}
+    room = data.get("room")
+    user = data.get("user")
+    if not room or not user:
+        return
+    leave_room(room)
+    if room in ROOMS and user in ROOMS[room]["users"]:
+        ROOMS[room]["users"].remove(user)
+        emit("user_left", {"user": user, "room": room}, room=room)
+        emit("room_users", {"room": room, "users": list(ROOMS[room]["users"])}, room=room)
+        # optional: delete empty room to keep list tidy
+        if len(ROOMS[room]["users"]) == 0 and len(ROOMS[room]["history"]) == 0:
+            ROOMS.pop(room, None)
+
+@socketio.on("message")
+def on_message(data):
+    # data: {"room": "roomname", "user": "displayname", "text": "hello"}
+    room = data.get("room")
+    user = data.get("user")
+    text = data.get("text", "").strip()
+    if not room or not user or not text:
+        return
+    msg = add_message_to_room(room, user, text)
+    emit("message", {"room": room, "message": msg}, room=room)
+
+@socketio.on("typing")
+def on_typing(data):
+    # data: {"room": "roomname", "user": "displayname", "typing": True/False}
+    room = data.get("room")
+    user = data.get("user")
+    typing = data.get("typing", False)
+    if room and user:
+        emit("typing", {"room": room, "user": user, "typing": typing}, room=room, include_self=False)
+
+@socketio.on("disconnect")
+def on_disconnect():
+    # We don't know which user disconnected (no session store here).
+    # For a full implementation, map session IDs to usernames & rooms.
+    pass
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    # Use eventlet WSGI server
+    socketio.run(app, host="0.0.0.0", port=port)
